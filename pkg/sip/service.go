@@ -103,8 +103,16 @@ func NewService(region string, conf *config.Config, mon *stats.Monitor, log logg
 	if conf.MediaTimeoutInitial <= 0 {
 		conf.MediaTimeoutInitial = defaultMediaTimeoutInitial
 	}
+	var dtlsCert *dtlsCertificate
+	if conf.DTLSSRTP.Enabled {
+		var err error
+		dtlsCert, err = newDTLSCertificate()
+		if err != nil {
+			return nil, fmt.Errorf("create DTLS-SRTP certificate: %w", err)
+		}
+	}
 	cli := NewClient(region, conf, log, mon, getStateHandler)
-	options := append([]ServerOption{WithClient(cli)}, opts...)
+	options := append([]ServerOption{WithClient(cli), WithDTLSSRTPCertificate(dtlsCert)}, opts...)
 	s := &Service{
 		conf:             conf,
 		log:              log,

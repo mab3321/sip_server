@@ -53,6 +53,14 @@ type OpusConfig struct {
 	PacketLossPercent int  `yaml:"packet_loss_percent"` // expected packet loss 0-100, tunes FEC
 }
 
+// DTLSSRTPConfig enables WebRTC-style DTLS-SRTP media for SIP peers such as
+// Meta Business Calling. It is deliberately independent of SIP signaling TLS
+// and of the legacy SDES media-encryption setting.
+type DTLSSRTPConfig struct {
+	Enabled          bool          `yaml:"enabled"`
+	HandshakeTimeout time.Duration `yaml:"handshake_timeout"`
+}
+
 const (
 	// After a call closes we keep its RTP port bound and draining so a freshly
 	// allocated call can't inherit a port a peer is still sending stale media to.
@@ -134,6 +142,7 @@ type Config struct {
 	Codecs               map[string]bool `yaml:"codecs"`
 	EnableOpus           bool            `yaml:"enable_opus"`
 	Opus                 OpusConfig      `yaml:"opus"`
+	DTLSSRTP             DTLSSRTPConfig  `yaml:"dtls_srtp"`
 
 	// HideInboundPort controls how SIP endpoint responds to unverified inbound requests.
 	// Setting it to true makes SIP server silently drop INVITE requests if it gets a negative Auth or Dispatch response.
@@ -218,6 +227,9 @@ func (c *Config) Init() error {
 	}
 	if c.MaxCpuUtilization <= 0 || c.MaxCpuUtilization > 1 {
 		c.MaxCpuUtilization = 0.9
+	}
+	if c.DTLSSRTP.HandshakeTimeout <= 0 {
+		c.DTLSSRTP.HandshakeTimeout = 10 * time.Second
 	}
 
 	if err := c.InitLogger(); err != nil {

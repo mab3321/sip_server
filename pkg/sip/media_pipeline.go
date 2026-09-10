@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -61,7 +62,10 @@ func (p *MediaPort) SetConfig(c *MediaConf) error {
 		sess rtp.Session
 		err  error
 	)
-	if c.Crypto != nil {
+	if c.DTLS != nil {
+		remote := &net.UDPAddr{IP: c.Remote.Addr().AsSlice(), Port: int(c.Remote.Port())}
+		sess = newDTLSSRTPSession(p.log, p.port, c.DTLS, p.opts.DTLSHandshakeTimeout, remote)
+	} else if c.Crypto != nil {
 		sess, err = srtp.NewSession(p.log, p.port, c.Crypto)
 	} else {
 		sess = rtp.NewSession(p.log, p.port)

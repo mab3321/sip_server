@@ -916,6 +916,9 @@ func (c *inboundCall) handleInvite(ctx context.Context, tid traceid.ID, req *sip
 			} else if errors.Is(err, sdp.ErrNoCommonCrypto) {
 				status, term = callMediaFailed, stats.ClientError("no-common-crypto")
 				sipReason = sip.StatusBadRequest
+			} else if errors.Is(err, errDTLSSDP) {
+				status, term = callMediaFailed, stats.ClientError("dtls-sdp-error")
+				sipReason = sip.StatusNotAcceptableHere
 			} else if e := (SDPError{}); errors.As(err, &e) {
 				status, term = callMediaFailed, stats.ClientError("sdp-error")
 				sipReason = sip.StatusBadRequest
@@ -1126,6 +1129,9 @@ func (c *inboundCall) runMediaConn(tid traceid.ID, offerData []byte, mconf *sipM
 		NoInputResample:      !RoomResample,
 		DrainingIdleTimeout:  conf.RTPDrainingIdleTimeout,
 		DrainingDuration:     conf.RTPDrainingDuration,
+		DTLSEnabled:          conf.DTLSSRTP.Enabled,
+		DTLSCertificate:      c.s.dtlsCertificate,
+		DTLSHandshakeTimeout: conf.DTLSSRTP.HandshakeTimeout,
 	}, RoomSampleRate)
 	if err != nil {
 		return nil, err

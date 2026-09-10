@@ -16,6 +16,7 @@ package sip
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net"
@@ -347,6 +348,7 @@ func (c *udpConn) Close() error {
 type MediaConf struct {
 	sdp.MediaConfig
 	Processor msdk.PCM16Processor
+	DTLS      *dtlsMediaConfig
 }
 
 type MediaOptions struct {
@@ -363,6 +365,9 @@ type MediaOptions struct {
 	LogSignalChanges     bool
 	DrainingIdleTimeout  time.Duration
 	DrainingDuration     time.Duration
+	DTLSEnabled          bool
+	DTLSCertificate      *dtlsCertificate
+	DTLSHandshakeTimeout  time.Duration
 }
 
 func NewMediaPort(tid traceid.ID, log logger.Logger, mon *stats.CallMonitor, opts *MediaOptions, sampleRate int) (*MediaPort, error) {
@@ -734,6 +739,13 @@ func (p *MediaPort) SetAnswer(offer *sdp.Offer, answerData []byte, codecs *msdk.
 
 // SetOffer decodes the offer from another party and returns encoded answer. To accept the offer, call SetConfig.
 func (p *MediaPort) SetOffer(offerData []byte, codecs *msdk.CodecSet, enc sdp.Encryption) (*sdp.Answer, *MediaConf, error) {
+	dtlsConf, err := parseDTLSOffer(offerData, p.opts.DTLSCertificate)
+	if err != nil {
+		return nil, nil, SDPError{Err: err}
+	}
+	if dtlsConf != nil && !p.opts.DTLSEnabled {
+		return nil, nil, SDPError{Err: fmt.Errorf("%w: disabled", errDTLSSDP)}
+	}
 	offer, err := sdp.ParseOfferWith(codecs, offerData)
 	if err != nil {
 		return nil, nil, SDPError{Err: err}
@@ -743,7 +755,12 @@ func (p *MediaPort) SetOffer(offerData []byte, codecs *msdk.CodecSet, enc sdp.En
 	if err != nil {
 		return nil, nil, SDPError{Err: err}
 	}
-	return answer, &MediaConf{MediaConfig: *mc}, nil
+	if dtlsConf != nil {
+		if err := addDTLSAnswer(&answer.SDP, dtlsConf); err != nil {
+			return nil, nil, SDPError{Err: err}
+		}
+	}
+	return answer, &MediaConf{MediaConfig: *mc, DTLS: dtlsConf}, nil
 }
 
 // Reported for inbound (SetOffer) only since outbound (SetAnswer) only contains the
