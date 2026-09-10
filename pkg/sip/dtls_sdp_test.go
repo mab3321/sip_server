@@ -42,10 +42,69 @@ func TestDTLSAnswerUsesSAVPF(t *testing.T) {
 	require.NoError(t, err)
 	s := &psdp.SessionDescription{MediaDescriptions: []*psdp.MediaDescription{{MediaName: psdp.MediaName{Media: "audio", Port: psdp.RangedPort{Value: 10000}, Protos: []string{"RTP", "AVP"}, Formats: []string{"111"}}, Attributes: []psdp.Attribute{{Key: "rtpmap", Value: "111 opus/48000/2"}}}}}
 	require.NoError(t, addDTLSAnswer(s, conf))
-	raw, err := s.Marshal(); require.NoError(t, err)
+	raw, err := s.Marshal()
+	require.NoError(t, err)
 	text := string(raw)
 	require.Contains(t, text, "UDP/TLS/RTP/SAVPF")
 	require.Contains(t, text, "a=setup:passive")
 	require.Contains(t, text, "a=rtcp-mux")
 	require.Contains(t, text, "a=fingerprint:sha-256 "+cert.fingerprint)
+}
+
+func TestParseMetaICEOfferAndAnswer(t *testing.T) {
+	cert, err := newDTLSCertificate()
+	require.NoError(t, err)
+	offer := strings.Replace(
+		metaLikeOffer,
+		"a=setup:actpass\r\n",
+		"a=ice-lite\r\n"+
+			"a=candidate:2 1 udp 2122262783 2001:db8::1 3480 typ host\r\n"+
+			"a=candidate:1 1 udp 2122260223 198.51.100.10 3480 typ host\r\n"+
+			"a=ice-ufrag:remote-user\r\n"+
+			"a=ice-pwd:remote-password-value\r\n"+
+			"a=setup:actpass\r\n",
+		1,
+	)
+	conf, err := parseDTLSOffer([]byte(offer), cert)
+	require.NoError(t, err)
+	require.NotNil(t, conf.ice)
+	require.Equal(t, "remote-user", conf.ice.remoteUfrag)
+	require.Equal(t, "remote-password-value", conf.ice.remotePwd)
+	require.Equal(t, "198.51.100.10:3480", conf.ice.remote.String())
+	require.NotEmpty(t, conf.ice.localUfrag)
+	require.NotEmpty(t, conf.ice.localPwd)
+
+	var answer psdp.SessionDescription
+	require.NoError(t, answer.Unmarshal([]byte(
+		"v=0\r\n"+
+			"o=- 1 1 IN IP4 203.0.113.20\r\n"+
+			"s=-\r\n"+
+			"c=IN IP4 203.0.113.20\r\n"+
+			"t=0 0\r\n"+
+			"m=audio 12000 RTP/AVP 111\r\n"+
+			"a=rtpmap:111 opus/48000/2\r\n",
+	)))
+	require.NoError(t, addDTLSAnswer(&answer, conf))
+	raw, err := answer.Marshal()
+	require.NoError(t, err)
+	text := string(raw)
+	require.Contains(t, text, "a=ice-ufrag:"+conf.ice.localUfrag)
+	require.Contains(t, text, "a=ice-pwd:"+conf.ice.localPwd)
+	require.Contains(t, text, "a=candidate:1 1 udp 2130706431 203.0.113.20 12000 typ host")
+}
+
+func TestParseMetaICEOfferRequiresIPv4Candidate(t *testing.T) {
+	cert, err := newDTLSCertificate()
+	require.NoError(t, err)
+	offer := strings.Replace(
+		metaLikeOffer,
+		"a=setup:actpass\r\n",
+		"a=candidate:2 1 udp 2122262783 2001:db8::1 3480 typ host\r\n"+
+			"a=ice-ufrag:remote-user\r\n"+
+			"a=ice-pwd:remote-password-value\r\n"+
+			"a=setup:actpass\r\n",
+		1,
+	)
+	_, err = parseDTLSOffer([]byte(offer), cert)
+	require.ErrorIs(t, err, errDTLSSDP)
 }
