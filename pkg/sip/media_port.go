@@ -751,7 +751,14 @@ func (p *MediaPort) SetOffer(offerData []byte, codecs *msdk.CodecSet, enc sdp.En
 		return nil, nil, SDPError{Err: err}
 	}
 	p.reportPeerCodecs(offer.MediaDesc)
-	answer, mc, err := offer.Answer(p.externalIP, p.Port(), enc)
+	// DTLS-SRTP has its own keying negotiation. Do not ask the legacy SDP
+	// implementation to find an SDES crypto profile for a SAVPF offer: Meta
+	// correctly supplies DTLS fingerprint/setup attributes rather than a=crypto.
+	answerEncryption := enc
+	if dtlsConf != nil {
+		answerEncryption = sdp.EncryptionNone
+	}
+	answer, mc, err := offer.Answer(p.externalIP, p.Port(), answerEncryption)
 	if err != nil {
 		return nil, nil, SDPError{Err: err}
 	}
