@@ -47,6 +47,14 @@ import (
 // call has been torn down.
 var errRoomClosed = errors.New("room is closed")
 
+const (
+	warmTransferStateAttribute   = "sip.warmTransfer.state"
+	warmTransferAllowedAttribute = "sip.warmTransfer.allowedParticipant"
+	warmTransferAppliedAttribute = "sip.warmTransfer.applied"
+	warmTransferConsulting       = "consulting"
+	warmTransferConnected        = "connected"
+)
+
 type RoomStatsSnapshot struct {
 	// Stats quantifying total incoming traffic from all tracks
 	InputPackets   uint64 `json:"input_packets"`
@@ -228,14 +236,18 @@ type Room struct {
 
 	// p is replaced on every reconnect, since the server issues a new
 	// participant SID, and read concurrently by Participant().
-	p          atomic.Pointer[ParticipantInfo]
-	reconnect  atomic.Pointer[reconnectState]
-	ready      core.Fuse
-	subscribe  atomic.Bool
-	subscribed core.Fuse
-	stopped    core.Fuse
-	closed     core.Fuse
-	stats      *RoomStats
+	p         atomic.Pointer[ParticipantInfo]
+	reconnect atomic.Pointer[reconnectState]
+	ready     core.Fuse
+	subscribe atomic.Bool
+	// warmTransferAllowed limits both sides of this SIP leg to one consultation
+	// participant. A nil pointer preserves the normal subscribe-all behavior.
+	warmTransferAllowed atomic.Pointer[string]
+	warmTransferMu      sync.Mutex
+	subscribed          core.Fuse
+	stopped             core.Fuse
+	closed              core.Fuse
+	stats               *RoomStats
 }
 
 type ParticipantConfig struct {
@@ -344,6 +356,11 @@ func (r *Room) participantJoin(rp *lksdk.RemoteParticipant) {
 	}
 }
 
+func (r *Room) warmTransferParticipantAllowed(identity string) bool {
+	allowed := r.warmTransferAllowed.Load()
+	return allowed == nil || *allowed == identity
+}
+
 func (r *Room) participantLeft(rp *lksdk.RemoteParticipant) {
 	log := r.roomLog.WithValues("participant", rp.Identity(), "participantID", rp.SID())
 	log.Debugw("participant left")
@@ -353,6 +370,10 @@ func (r *Room) subscribeTo(pub *lksdk.RemoteTrackPublication, rp *lksdk.RemotePa
 	log := r.roomLog.WithValues("participant", rp.Identity(), "participantID", rp.SID(), "trackID", pub.SID(), "trackName", pub.Name())
 	if pub.Kind() != lksdk.TrackKindAudio {
 		log.Debugw("skipping non-audio track")
+		return
+	}
+	if !r.warmTransferParticipantAllowed(rp.Identity()) {
+		log.Debugw("skipping track outside warm transfer consultation")
 		return
 	}
 	log.Debugw("subscribing to a track")
@@ -418,6 +439,7 @@ func (r *Room) Connect(ctx context.Context, conf *config.Config, rconf RoomConfi
 	}
 	r.room.Store(room)
 	r.setParticipantFromRoom()
+	r.applyWarmTransferState(room, partConf.Attributes, true, true)
 	p := r.Participant()
 	r.log = r.log.WithValues("room", room.Name(), "roomID", room.SID(), "participant", p.Identity, "participantID", p.ID)
 	r.log.Infow("SIP participant joined room")
@@ -464,6 +486,18 @@ func (r *Room) newRoomCallback(conf *config.Config, rconf RoomConfig) *lksdk.Roo
 			r.participantLeft(rp)
 		},
 		ParticipantCallback: lksdk.ParticipantCallback{
+			OnAttributesChanged: func(changed map[string]string, p lksdk.Participant) {
+				room := r.room.Load()
+				if room == nil || p.Identity() != room.LocalParticipant.Identity() {
+					return
+				}
+				if _, stateChanged := changed[warmTransferStateAttribute]; !stateChanged {
+					if _, allowedChanged := changed[warmTransferAllowedAttribute]; !allowedChanged {
+						return
+					}
+				}
+				r.applyWarmTransferState(room, p.Attributes(), true, true)
+			},
 			OnTrackPublished: func(pub *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
 				log := r.roomLog.WithValues("participant", rp.Identity(), "participantID", rp.SID(), "trackID", pub.SID(), "trackName", pub.Name())
 				if !r.subscribe.Load() {
@@ -634,6 +668,10 @@ func (r *Room) onReconnected() {
 	}
 
 	r.setParticipantFromRoom()
+	// A reconnect rebuilds the peer connection, and a resume may replay stale
+	// permissions. Reapply publication isolation in both cases. Subscription
+	// reconciliation remains below so a resume does not duplicate subscriptions.
+	r.applyWarmTransferState(room, room.LocalParticipant.Attributes(), false, false)
 	r.roomLog.Infow("recovered connection to room",
 		"kind", recoveryKind(resumed),
 		"gap", gap,
@@ -666,6 +704,56 @@ func (r *Room) resubscribeAfterReconnect(room *lksdk.Room) {
 	}
 	r.roomLog.Infow("re-subscribing to remote tracks after reconnect")
 	r.subscribeAll(room)
+}
+
+func (r *Room) applyWarmTransferState(room *lksdk.Room, attrs map[string]string, acknowledge, reconcileSubscriptions bool) {
+	r.warmTransferMu.Lock()
+	defer r.warmTransferMu.Unlock()
+
+	state := strings.TrimSpace(attrs[warmTransferStateAttribute])
+	allowed := strings.TrimSpace(attrs[warmTransferAllowedAttribute])
+	if state == warmTransferConsulting && allowed != "" {
+		allowedCopy := allowed
+		r.warmTransferAllowed.Store(&allowedCopy)
+		room.LocalParticipant.SetSubscriptionPermission(&livekit.SubscriptionPermission{
+			AllParticipants: false,
+			TrackPermissions: []*livekit.TrackPermission{{
+				ParticipantIdentity: allowed,
+				AllTracks:           true,
+			}},
+		})
+		for _, rp := range room.GetRemoteParticipants() {
+			if rp.Identity() == allowed {
+				continue
+			}
+			for _, pub := range rp.TrackPublications() {
+				if remotePub, ok := pub.(*lksdk.RemoteTrackPublication); ok && remotePub.IsSubscribed() {
+					_ = remotePub.SetSubscribed(false)
+				}
+			}
+		}
+		if reconcileSubscriptions && r.subscribe.Load() {
+			r.subscribeAll(room)
+		}
+		r.acknowledgeWarmTransfer(room, state, attrs, acknowledge)
+		return
+	}
+
+	if state == warmTransferConnected {
+		r.warmTransferAllowed.Store(nil)
+		room.LocalParticipant.SetSubscriptionPermission(&livekit.SubscriptionPermission{AllParticipants: true})
+		if reconcileSubscriptions && r.subscribe.Load() {
+			r.subscribeAll(room)
+		}
+		r.acknowledgeWarmTransfer(room, state, attrs, acknowledge)
+	}
+}
+
+func (r *Room) acknowledgeWarmTransfer(room *lksdk.Room, state string, attrs map[string]string, acknowledge bool) {
+	if !acknowledge || attrs[warmTransferAppliedAttribute] == state {
+		return
+	}
+	room.LocalParticipant.SetAttributes(map[string]string{warmTransferAppliedAttribute: state})
 }
 
 func (r *Room) RegisterRpcCtxMethod(method string, handler lksdk.RpcHandlerCtxFunc) error {

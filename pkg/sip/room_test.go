@@ -63,6 +63,22 @@ func testRemoteInfo() []*livekit.ParticipantInfo {
 	}}
 }
 
+func TestWarmTransferParticipantAllowed(t *testing.T) {
+	r := NewRoom(logger.NewTestLogger(t), &RoomStats{})
+	t.Cleanup(func() { _ = r.Close() })
+
+	require.True(t, r.warmTransferParticipantAllowed("caller"), "normal calls allow every participant")
+
+	allowed := "warm-transfer-consult-test"
+	r.warmTransferAllowed.Store(&allowed)
+	require.True(t, r.warmTransferParticipantAllowed(allowed))
+	require.False(t, r.warmTransferParticipantAllowed("caller"))
+	require.False(t, r.warmTransferParticipantAllowed("primary-agent"))
+
+	r.warmTransferAllowed.Store(nil)
+	require.True(t, r.warmTransferParticipantAllowed("caller"), "connected calls allow everyone")
+}
+
 // --- reconnect ---------------------------------------------------------------
 
 type reconnectFixture struct {
@@ -178,6 +194,37 @@ func TestRoomReconnect(t *testing.T) {
 			return f.room.stats.TrackSubscribes.Load() > before
 		}, time.Second, 10*time.Millisecond,
 			"SIP must re-subscribe to remote tracks after a reconnect")
+	})
+
+	t.Run("reconnect preserves consultation subscription isolation", func(t *testing.T) {
+		f := newReconnectFixture(t)
+		f.join(t)
+
+		allowed := "warm-transfer-consult-test"
+		f.room.warmTransferAllowed.Store(&allowed)
+		before := f.room.stats.TrackSubscribes.Load()
+		f.reconnectEscalated()
+
+		require.Never(t, func() bool {
+			return f.room.stats.TrackSubscribes.Load() > before
+		}, 200*time.Millisecond, 20*time.Millisecond,
+			"SIP must not subscribe to disallowed caller audio after reconnect")
+	})
+
+	t.Run("connected transition restores reconnect subscriptions", func(t *testing.T) {
+		f := newReconnectFixture(t)
+		f.join(t)
+
+		allowed := "warm-transfer-consult-test"
+		f.room.warmTransferAllowed.Store(&allowed)
+		f.room.warmTransferAllowed.Store(nil)
+		before := f.room.stats.TrackSubscribes.Load()
+		f.reconnectEscalated()
+
+		require.Eventually(t, func() bool {
+			return f.room.stats.TrackSubscribes.Load() > before
+		}, time.Second, 10*time.Millisecond,
+			"connected SIP leg must resume subscribing to caller audio")
 	})
 
 	// An outbound call joins the room and publishes before it starts dialing, but
