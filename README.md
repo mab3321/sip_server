@@ -71,6 +71,10 @@ psrpc: # optional gzip compression of psrpc bus payloads, see the compatibility 
 
 The config file can be added to a mounted volume with its location passed in the SIP_CONFIG_FILE env var, or its body can be passed in the SIP_CONFIG_BODY env var.
 
+For the optional Nayatel-compatible, non-REFER cold-transfer flow, including
+direct-media behavior, fallback, deployment, validation, and rollback, see
+[docs/nayatel-invite-transfer.md](docs/nayatel-invite-transfer.md).
+
 > **Compatibility note on `psrpc.compression`**
 >
 > Bus compression requires psrpc v0.7.6 or newer on **every** node sharing the redis bus. An older peer
