@@ -33,6 +33,17 @@ type inviteBridge struct {
 }
 
 func (c *inboundCall) startInviteBridge(ctx context.Context, transferTo string, headers map[string]string) error {
+	if c.s.conf.InviteDirectMediaTransfer {
+		if err := c.startInviteDirectMedia(ctx, transferTo, headers); err == nil {
+			return nil
+		} else {
+			c.log().Warnw("direct-media transfer failed; falling back to anchored INVITE bridge", err)
+		}
+	}
+	return c.startAnchoredInviteBridge(ctx, transferTo, headers)
+}
+
+func (c *inboundCall) startAnchoredInviteBridge(ctx context.Context, transferTo string, headers map[string]string) error {
 	if c.s.cli == nil {
 		return errors.New("outbound SIP client is unavailable")
 	}
@@ -173,6 +184,57 @@ func (c *inboundCall) startInviteBridge(ctx context.Context, transferTo string, 
 	return nil
 }
 
+func (c *inboundCall) startInviteDirectMedia(ctx context.Context, transferTo string, headers map[string]string) error {
+	rawURI := strings.TrimSpace(transferTo)
+	uri, err := buildRawURI(rawURI, SIPTransportFrom(c.cc.legTr))
+	if err != nil {
+		return fmt.Errorf("invalid direct-media destination: %w", err)
+	}
+	callerOffer := c.cc.invite.Body()
+	if len(callerOffer) == 0 {
+		return errors.New("caller dialog has no SDP offer")
+	}
+	fromURI := c.cc.To()
+	fromURI.Host = c.s.sconf.SignalingIP.String()
+	fromURI.Port = c.s.conf.SIPPort
+	toURI := *uri
+	outTag := LocalTag(lksip.NewCallID())
+	log := c.log().WithValues("bridgeCallID", outTag, "bridgeTo", toURI.String(), "transferMode", "invite-direct-media")
+	outCC := c.s.cli.newOutbound(log, outTag, uri, &sip.ToHeader{Address: toURI}, &sip.FromHeader{Address: fromURI}, c.s.cli.ContactURI(c.cc.legTr), nil)
+	if len(c.s.conf.OutboundRouteHeaders) != 0 {
+		outCC.routeHeaders = c.s.conf.OutboundRouteHeaders
+	}
+	bridge := &inviteBridge{in: c, outCC: outCC, outTag: outTag, to: toURI.User, started: time.Now()}
+	c.s.cli.cmu.Lock()
+	c.s.cli.bridgeCalls[outTag] = bridge
+	c.s.cli.cmu.Unlock()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			bridge.closeFromService(context.Background())
+		}
+	}()
+
+	destinationSDP, err := outCC.Invite(ctx, "", "", headers, callerOffer, nil)
+	if err != nil {
+		return err
+	}
+	if err := outCC.AckInviteOK(ctx); err != nil {
+		return err
+	}
+	if _, err := c.cc.Reinvite(ctx, destinationSDP); err != nil {
+		return fmt.Errorf("re-INVITE caller for direct media: %w", err)
+	}
+
+	bridge.answered = time.Now()
+	c.inviteBridge.Store(bridge)
+	c.bridged.Break()
+	cleanup = false
+	log.Infow("direct-media INVITE transfer established; detaching call from LiveKit room")
+	time.AfterFunc(500*time.Millisecond, func() { _ = c.lkRoom.Close() })
+	return nil
+}
+
 func (b *inviteBridge) unregister() {
 	b.in.s.cli.cmu.Lock()
 	delete(b.in.s.cli.bridgeCalls, b.outTag)
@@ -189,7 +251,9 @@ func (b *inviteBridge) closeFromInbound(ctx context.Context) {
 	b.close.Do(func() {
 		b.unregister()
 		b.outCC.Close(ctx, nil)
-		b.outMedia.Close()
+		if b.outMedia != nil {
+			b.outMedia.Close()
+		}
 		b.done.Break()
 	})
 }
@@ -197,7 +261,9 @@ func (b *inviteBridge) closeFromInbound(ctx context.Context) {
 func (b *inviteBridge) closeFromOutbound(ctx context.Context) {
 	b.close.Do(func() {
 		b.unregister()
-		b.outMedia.Close()
+		if b.outMedia != nil {
+			b.outMedia.Close()
+		}
 		b.done.Break()
 		b.in.Close()
 	})

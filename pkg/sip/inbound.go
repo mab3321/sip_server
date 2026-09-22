@@ -2461,6 +2461,48 @@ func (c *sipInbound) Transaction(req *sip.Request) (sip.ClientTransaction, error
 	return c.s.sipSrv.TransactionLayer().Request(req)
 }
 
+// Reinvite sends an in-dialog offer to the inbound carrier leg and returns
+// its SDP answer. This is intentionally small so experimental RFC 3725 3PCC
+// can use the same dialog route set and transaction machinery as BYE/REFER.
+func (c *sipInbound) Reinvite(ctx context.Context, offer []byte) ([]byte, error) {
+	c.mu.Lock()
+	if c.invite == nil || c.inviteOk == nil {
+		c.mu.Unlock()
+		return nil, psrpc.NewErrorf(psrpc.FailedPrecondition, "can't re-INVITE non established call")
+	}
+	req := sip.NewRequest(sip.INVITE, c.invite.Recipient)
+	sip.CopyHeaders("From", c.invite, req)
+	sip.CopyHeaders("To", c.inviteOk, req)
+	sip.CopyHeaders("Call-ID", c.invite, req)
+	for _, hdr := range c.invite.GetHeaders("Record-Route") {
+		req.AppendHeader(sip.HeaderClone(hdr))
+	}
+	req.AppendHeader(c.contact)
+	req.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
+	req.AppendHeader(sip.NewHeader("Allow", "INVITE, ACK, CANCEL, BYE, NOTIFY, REFER, MESSAGE, OPTIONS, INFO, SUBSCRIBE"))
+	req.SetBody(offer)
+	c.setCSeq(req)
+	c.swapSrcDst(req)
+	c.mu.Unlock()
+
+	tx, err := c.Transaction(req)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Terminate()
+	resp, err := sipResponse(ctx, tx, c.s.closing.Watch(), nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != sip.StatusOK {
+		return nil, fmt.Errorf("unexpected re-INVITE response: %w", &livekit.SIPStatus{Code: livekit.SIPStatusCode(resp.StatusCode), Status: resp.Reason})
+	}
+	if err := c.WriteRequest(sip.NewAckRequest(req, resp, nil)); err != nil {
+		return nil, err
+	}
+	return resp.Body(), nil
+}
+
 func (c *sipInbound) newReferReq(transferTo string, headers map[string]string) (*sip.Request, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

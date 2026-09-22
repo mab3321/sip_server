@@ -120,8 +120,13 @@ type Config struct {
 	// InviteBridgeTransfer replaces REFER with an outbound INVITE and bridges
 	// both SIP legs locally. This is intended for carriers that do not support
 	// REFER. The SIP service remains the B2BUA and RTP anchor after transfer.
-	InviteBridgeTransfer  bool                         `yaml:"invite_bridge_transfer"`
-	CallCompletionWebhook *CallCompletionWebhookConfig `yaml:"call_completion_webhook"`
+	InviteBridgeTransfer bool `yaml:"invite_bridge_transfer"`
+	// InviteDirectMediaTransfer experimentally uses RFC 3725-style third-party
+	// call control to point the two carrier legs at each other's SDP. It is only
+	// considered when InviteBridgeTransfer is enabled and falls back to the
+	// anchored bridge if negotiation fails.
+	InviteDirectMediaTransfer bool                         `yaml:"invite_direct_media_transfer"`
+	CallCompletionWebhook     *CallCompletionWebhookConfig `yaml:"call_completion_webhook"`
 
 	UseExternalIP bool   `yaml:"use_external_ip"`
 	LocalNet      string `yaml:"local_net"` // local IP net to use, e.g. 192.168.0.0/24
