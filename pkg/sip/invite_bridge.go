@@ -226,6 +226,10 @@ func (c *inboundCall) startInviteDirectMedia(ctx context.Context, transferTo str
 		return fmt.Errorf("re-INVITE caller for direct media: %w", err)
 	}
 
+	// RTP now flows between the carrier legs. The original MediaPort remains
+	// allocated only as a signaling/lifecycle anchor, so its inactivity must
+	// not terminate a healthy direct-media call.
+	c.media.DisableTimeout()
 	bridge.answered = time.Now()
 	c.inviteBridge.Store(bridge)
 	c.bridged.Break()

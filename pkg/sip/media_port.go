@@ -447,6 +447,9 @@ type MediaPort interface {
 	//
 	// NOTE: This method is likely to go through additional changes.
 	SetTimeout(initial, general time.Duration)
+	// DisableTimeout disarms media inactivity detection. Signaling remains the
+	// lifecycle authority after a successful direct-media handoff.
+	DisableTimeout()
 
 	Received() <-chan struct{}
 	MediaTimeout() <-chan struct{}
@@ -561,6 +564,15 @@ func (p *mediaPort) SetTimeout(initial, general time.Duration) {
 	select {
 	case p.timeoutKick <- struct{}{}:
 	default: // already pending
+	}
+}
+
+func (p *mediaPort) DisableTimeout() {
+	p.timeoutStart.Store(nil)
+	p.log.Debugw("media timeout disabled", "packets", p.packetCount.Load())
+	select {
+	case p.timeoutKick <- struct{}{}:
+	default:
 	}
 }
 
