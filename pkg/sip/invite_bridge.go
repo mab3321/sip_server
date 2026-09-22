@@ -11,11 +11,66 @@ import (
 	"github.com/frostbyte73/core"
 	msdk "github.com/livekit/media-sdk"
 	"github.com/livekit/media-sdk/sdp"
+	"github.com/livekit/protocol/livekit"
 	lksip "github.com/livekit/protocol/sip"
+	lksdk "github.com/livekit/server-sdk-go/v2"
 	"github.com/livekit/sipgo/sip"
 
 	"github.com/livekit/sip/pkg/stats"
 )
+
+const inviteBridgeTrunkIDHeader = "X-LiveKit-Outbound-Trunk-ID"
+
+type inviteBridgeTarget struct {
+	uri       *sip.Uri
+	transport Transport
+	username  string
+	password  string
+}
+
+func (c *inboundCall) resolveInviteBridgeTarget(ctx context.Context, transferTo string, headers map[string]string) (*inviteBridgeTarget, error) {
+	rawURI := strings.TrimSpace(transferTo)
+	trunkID := strings.TrimSpace(headers[inviteBridgeTrunkIDHeader])
+	delete(headers, inviteBridgeTrunkIDHeader) // control metadata must never be sent to the carrier
+	if trunkID == "" {
+		uri, err := buildRawURI(rawURI, SIPTransportFrom(c.cc.legTr))
+		if err != nil {
+			return nil, err
+		}
+		return &inviteBridgeTarget{uri: uri, transport: c.cc.legTr}, nil
+	}
+
+	client := lksdk.NewSIPClient(c.s.conf.WsUrl, c.s.conf.ApiKey, c.s.conf.ApiSecret)
+	resp, err := client.ListSIPOutboundTrunk(ctx, &livekit.ListSIPOutboundTrunkRequest{TrunkIds: []string{trunkID}})
+	if err != nil {
+		return nil, fmt.Errorf("load outbound trunk %q: %w", trunkID, err)
+	}
+	if len(resp.Items) != 1 || resp.Items[0].SipTrunkId != trunkID {
+		return nil, fmt.Errorf("outbound trunk %q not found", trunkID)
+	}
+	trunk := resp.Items[0]
+	transport := TransportFrom(trunk.Transport)
+
+	var user string
+	if parsed, parseErr := buildRawURI(rawURI, trunk.Transport); parseErr == nil {
+		user = parsed.User
+	} else {
+		user = strings.TrimPrefix(strings.TrimPrefix(rawURI, "tel:"), "TEL:")
+	}
+	if user == "" {
+		return nil, errors.New("transfer destination has no user or phone number")
+	}
+	uri, err := buildLegacyURI(user, trunk.Address, trunk.Transport)
+	if err != nil {
+		return nil, fmt.Errorf("build destination from outbound trunk %q: %w", trunkID, err)
+	}
+	return &inviteBridgeTarget{
+		uri:       uri,
+		transport: transport,
+		username:  trunk.AuthUsername,
+		password:  trunk.AuthPassword,
+	}, nil
+}
 
 // inviteBridge owns an inbound carrier dialog and the outbound dialog created
 // for a non-REFER transfer. Audio and DTMF are connected directly between the
@@ -55,11 +110,11 @@ func (c *inboundCall) startAnchoredInviteBridge(ctx context.Context, transferTo 
 		return errors.New("call is already INVITE-bridged")
 	}
 
-	rawURI := strings.TrimSpace(transferTo)
-	uri, err := buildRawURI(rawURI, SIPTransportFrom(c.cc.legTr))
+	target, err := c.resolveInviteBridgeTarget(ctx, transferTo, headers)
 	if err != nil {
 		return fmt.Errorf("invalid INVITE bridge destination: %w", err)
 	}
+	uri := target.uri
 
 	fromURI := c.cc.To()
 	fromURI.Host = c.s.sconf.SignalingIP.String()
@@ -78,7 +133,7 @@ func (c *inboundCall) startAnchoredInviteBridge(ctx context.Context, transferTo 
 		uri,
 		&sip.ToHeader{Address: toURI},
 		&sip.FromHeader{Address: fromURI},
-		c.s.cli.ContactURI(c.cc.legTr),
+		c.s.cli.ContactURI(target.transport),
 		nil,
 	)
 	if len(c.s.conf.OutboundRouteHeaders) != 0 {
@@ -138,7 +193,7 @@ func (c *inboundCall) startAnchoredInviteBridge(ctx context.Context, transferTo 
 	if err != nil {
 		return fmt.Errorf("generate INVITE bridge offer: %w", err)
 	}
-	answer, err := outCC.Invite(dialCtx, "", "", headers, offer, nil)
+	answer, err := outCC.Invite(dialCtx, target.username, target.password, headers, offer, nil)
 	if err != nil {
 		return err
 	}
@@ -189,11 +244,11 @@ func (c *inboundCall) startAnchoredInviteBridge(ctx context.Context, transferTo 
 }
 
 func (c *inboundCall) startInviteDirectMedia(ctx context.Context, transferTo string, headers map[string]string) error {
-	rawURI := strings.TrimSpace(transferTo)
-	uri, err := buildRawURI(rawURI, SIPTransportFrom(c.cc.legTr))
+	target, err := c.resolveInviteBridgeTarget(ctx, transferTo, headers)
 	if err != nil {
 		return fmt.Errorf("invalid direct-media destination: %w", err)
 	}
+	uri := target.uri
 	callerOffer := c.cc.invite.Body()
 	if len(callerOffer) == 0 {
 		return errors.New("caller dialog has no SDP offer")
@@ -204,7 +259,7 @@ func (c *inboundCall) startInviteDirectMedia(ctx context.Context, transferTo str
 	toURI := *uri
 	outTag := LocalTag(lksip.NewCallID())
 	log := c.log().WithValues("bridgeCallID", outTag, "bridgeTo", toURI.String(), "transferMode", "invite-direct-media")
-	outCC := c.s.cli.newOutbound(log, outTag, uri, &sip.ToHeader{Address: toURI}, &sip.FromHeader{Address: fromURI}, c.s.cli.ContactURI(c.cc.legTr), nil)
+	outCC := c.s.cli.newOutbound(log, outTag, uri, &sip.ToHeader{Address: toURI}, &sip.FromHeader{Address: fromURI}, c.s.cli.ContactURI(target.transport), nil)
 	if len(c.s.conf.OutboundRouteHeaders) != 0 {
 		outCC.routeHeaders = c.s.conf.OutboundRouteHeaders
 	}
@@ -219,7 +274,7 @@ func (c *inboundCall) startInviteDirectMedia(ctx context.Context, transferTo str
 		}
 	}()
 
-	destinationSDP, err := outCC.Invite(ctx, "", "", headers, callerOffer, nil)
+	destinationSDP, err := outCC.Invite(ctx, target.username, target.password, headers, callerOffer, nil)
 	if err != nil {
 		return err
 	}

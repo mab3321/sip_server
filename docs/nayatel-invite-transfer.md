@@ -19,6 +19,12 @@ direct-media negotiation fails the transfer visibly instead of consuming SIP
 server media resources. All options are disabled by default, so ordinary
 LiveKit SIP behavior is unchanged.
 
+The caller of `TransferSIPParticipant` should include
+`X-LiveKit-Outbound-Trunk-ID` in the request's `headers` map. The SIP worker
+removes this internal control header, loads that outbound trunk from the
+LiveKit SIP API, and uses its address, transport, and authentication. Trunk
+credentials are never hardcoded or forwarded to the carrier as headers.
+
 The completion webhook is independently configured with
 `call_completion_webhook` or the deployment's environment-backed configuration.
 Do not commit webhook credentials.
