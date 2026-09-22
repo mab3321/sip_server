@@ -1908,8 +1908,13 @@ func (c *inboundCall) transferCall(ctx context.Context, transferTo string, heade
 
 	c.log().Infow("inbound call transferred", "transferTo", transferTo)
 
-	// Give time for the peer to hang up first, but hang up ourselves if this doesn't happen within 1 second
-	time.AfterFunc(referByeTimeout, func() { c.Close() })
+	// A REFER hands the dialog to the peer, so close our original call if the
+	// peer does not do it promptly. An INVITE bridge is different: this process
+	// owns both dialogs for the remainder of the call and must keep them alive
+	// after detaching the SIP participant from the LiveKit room.
+	if !c.s.conf.InviteBridgeTransfer {
+		time.AfterFunc(referByeTimeout, func() { c.Close() })
+	}
 
 	return transferID, nil
 }
