@@ -52,10 +52,10 @@ func (c *inboundCall) resolveInviteBridgeTarget(ctx context.Context, transferTo 
 	transport := TransportFrom(trunk.Transport)
 
 	var user string
-	if parsed, parseErr := buildRawURI(rawURI, trunk.Transport); parseErr == nil {
+	if strings.HasPrefix(strings.ToLower(rawURI), "tel:") {
+		user = strings.TrimSpace(rawURI[len("tel:"):])
+	} else if parsed, parseErr := buildRawURI(rawURI, trunk.Transport); parseErr == nil {
 		user = parsed.User
-	} else {
-		user = strings.TrimPrefix(strings.TrimPrefix(rawURI, "tel:"), "TEL:")
 	}
 	if user == "" {
 		return nil, errors.New("transfer destination has no user or phone number")
