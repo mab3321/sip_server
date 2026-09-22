@@ -25,6 +25,9 @@ type inviteBridge struct {
 	outCC    *sipOutbound
 	outMedia MediaPort
 	outTag   LocalTag
+	to       string
+	started  time.Time
+	answered time.Time
 	done     core.Fuse
 	close    sync.Once
 }
@@ -93,6 +96,8 @@ func (c *inboundCall) startInviteBridge(ctx context.Context, transferTo string, 
 		outCC:    outCC,
 		outMedia: outMedia,
 		outTag:   outTag,
+		to:       toURI.User,
+		started:  time.Now(),
 	}
 	c.s.cli.cmu.Lock()
 	c.s.cli.bridgeCalls[outTag] = bridge
@@ -128,6 +133,7 @@ func (c *inboundCall) startInviteBridge(ctx context.Context, transferTo string, 
 	if err := outCC.AckInviteOK(dialCtx); err != nil {
 		return fmt.Errorf("acknowledge INVITE bridge: %w", err)
 	}
+	bridge.answered = time.Now()
 	outMedia.SetTimeout(c.s.conf.MediaTimeoutInitial, c.s.conf.MediaTimeout)
 
 	// Stop room audio before connecting the carrier legs so no AI audio can
@@ -175,6 +181,7 @@ func (b *inviteBridge) unregister() {
 
 func (b *inviteBridge) acceptOutboundBye(req *sip.Request, tx sip.ServerTransaction) {
 	b.outCC.AcceptBye(req, tx)
+	b.in.setCompletionHangupSource("destination")
 	b.closeFromOutbound(context.Background())
 }
 

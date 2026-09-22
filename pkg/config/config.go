@@ -81,6 +81,18 @@ type TCPConfig struct {
 	DialPort rtcconfig.PortRange `yaml:"dial_port"`
 }
 
+// CallCompletionWebhookConfig controls delivery of one terminal event for
+// every SIP call. Secrets can be supplied through the corresponding
+// SIP_CALL_COMPLETION_WEBHOOK_* environment variables instead of YAML.
+type CallCompletionWebhookConfig struct {
+	URL          string        `yaml:"url"`
+	BearerToken  string        `yaml:"bearer_token"`
+	XServiceKey  string        `yaml:"x_service_key"`
+	Timeout      time.Duration `yaml:"timeout"`
+	MaxAttempts  int           `yaml:"max_attempts"`
+	RetryBackoff time.Duration `yaml:"retry_backoff"`
+}
+
 type Config struct {
 	Redis     *redis.RedisConfig `yaml:"redis"`      // required
 	ApiKey    string             `yaml:"api_key"`    // required (env LIVEKIT_API_KEY)
@@ -108,7 +120,8 @@ type Config struct {
 	// InviteBridgeTransfer replaces REFER with an outbound INVITE and bridges
 	// both SIP legs locally. This is intended for carriers that do not support
 	// REFER. The SIP service remains the B2BUA and RTP anchor after transfer.
-	InviteBridgeTransfer bool `yaml:"invite_bridge_transfer"`
+	InviteBridgeTransfer  bool                         `yaml:"invite_bridge_transfer"`
+	CallCompletionWebhook *CallCompletionWebhookConfig `yaml:"call_completion_webhook"`
 
 	UseExternalIP bool   `yaml:"use_external_ip"`
 	LocalNet      string `yaml:"local_net"` // local IP net to use, e.g. 192.168.0.0/24
@@ -172,6 +185,20 @@ func NewConfig(confString string) (*Config, error) {
 			return nil, errors.ErrCouldNotParseConfig(err)
 		}
 	}
+	if conf.CallCompletionWebhook == nil && os.Getenv("SIP_CALL_COMPLETION_WEBHOOK_URL") != "" {
+		conf.CallCompletionWebhook = &CallCompletionWebhookConfig{}
+	}
+	if wh := conf.CallCompletionWebhook; wh != nil {
+		if v := os.Getenv("SIP_CALL_COMPLETION_WEBHOOK_URL"); v != "" {
+			wh.URL = v
+		}
+		if v := os.Getenv("SIP_CALL_COMPLETION_WEBHOOK_BEARER_TOKEN"); v != "" {
+			wh.BearerToken = v
+		}
+		if v := os.Getenv("SIP_CALL_COMPLETION_WEBHOOK_X_SERVICE_KEY"); v != "" {
+			wh.XServiceKey = v
+		}
+	}
 
 	if conf.Redis == nil {
 		return nil, psrpc.NewErrorf(psrpc.InvalidArgument, "redis configuration is required")
@@ -215,6 +242,17 @@ func (c *Config) Init() error {
 	}
 	if c.MaxCpuUtilization <= 0 || c.MaxCpuUtilization > 1 {
 		c.MaxCpuUtilization = 0.9
+	}
+	if wh := c.CallCompletionWebhook; wh != nil {
+		if wh.Timeout <= 0 {
+			wh.Timeout = 15 * time.Second
+		}
+		if wh.MaxAttempts <= 0 {
+			wh.MaxAttempts = 5
+		}
+		if wh.RetryBackoff <= 0 {
+			wh.RetryBackoff = time.Second
+		}
 	}
 
 	if err := c.InitLogger(); err != nil {

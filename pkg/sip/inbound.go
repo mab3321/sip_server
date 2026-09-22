@@ -645,6 +645,7 @@ func (s *Server) onBye(log *slog.Logger, req *sip.Request, tx sip.ServerTransact
 	s.cmu.RUnlock()
 	if c != nil {
 		c.cc.AcceptBye(req, tx)
+		c.setCompletionHangupSource("caller")
 		var (
 			reason    ReasonHeader
 			rawReason string
@@ -730,36 +731,37 @@ func (s *Server) onNotify(log *slog.Logger, req *sip.Request, tx sip.ServerTrans
 }
 
 type inboundCall struct {
-	s                 *Server
-	tid               traceid.ID
-	logPtr            atomic.Pointer[logger.Logger]
-	cc                *sipInbound
-	mon               *stats.CallMonitor
-	state             *CallState
-	callStart         time.Time
-	extraAttrs        map[string]string
-	attrsToHdr        map[string]string
-	ctx               context.Context
-	cancel            func()
-	closeReason       atomic.Pointer[ReasonHeader]
-	call              *rpc.SIPCall
-	mmu               sync.Mutex
-	media             MediaPort
-	mediaCodecs       *msdk.CodecSet
-	dtmf              chan dtmf.Event // buffered
-	endCall           chan EndCall    // buffered
-	lkRoom            RoomInterface   // LiveKit room; only active after correct pin is entered
-	callDur           func() time.Duration
-	joinDur           func() time.Duration
-	done              atomic.Bool
-	started           core.Fuse
-	bridged           core.Fuse
-	inviteBridge      atomic.Pointer[inviteBridge]
-	lateAnswerPending atomic.Bool // later offer generated, answer pending
-	stats             Stats
-	sigTs             SignalingTimestamps
-	jitterBuf         bool
-	projectID         string
+	s                      *Server
+	tid                    traceid.ID
+	logPtr                 atomic.Pointer[logger.Logger]
+	cc                     *sipInbound
+	mon                    *stats.CallMonitor
+	state                  *CallState
+	callStart              time.Time
+	extraAttrs             map[string]string
+	attrsToHdr             map[string]string
+	ctx                    context.Context
+	cancel                 func()
+	closeReason            atomic.Pointer[ReasonHeader]
+	call                   *rpc.SIPCall
+	mmu                    sync.Mutex
+	media                  MediaPort
+	mediaCodecs            *msdk.CodecSet
+	dtmf                   chan dtmf.Event // buffered
+	endCall                chan EndCall    // buffered
+	lkRoom                 RoomInterface   // LiveKit room; only active after correct pin is entered
+	callDur                func() time.Duration
+	joinDur                func() time.Duration
+	done                   atomic.Bool
+	started                core.Fuse
+	bridged                core.Fuse
+	inviteBridge           atomic.Pointer[inviteBridge]
+	completionHangupSource atomic.Pointer[string]
+	lateAnswerPending      atomic.Bool // later offer generated, answer pending
+	stats                  Stats
+	sigTs                  SignalingTimestamps
+	jitterBuf              bool
+	projectID              string
 }
 
 func (s *Server) newInboundCall(
@@ -811,6 +813,12 @@ func (c *inboundCall) log() logger.Logger {
 		return nil
 	}
 	return *ptr
+}
+
+func (c *inboundCall) setCompletionHangupSource(source string) {
+	p := new(string)
+	*p = source
+	c.completionHangupSource.CompareAndSwap(nil, p)
 }
 
 func (c *inboundCall) appendLogValues(kvs ...any) {
@@ -1607,6 +1615,7 @@ func (c *inboundCall) close(ctx context.Context, end EndCall) {
 	c.s.cmu.Unlock()
 
 	c.s.DeregisterTransferSIPParticipant(c.cc.ID())
+	c.emitCallCompletion(end, result.Code)
 
 	// Call the handler asynchronously to avoid blocking
 	if c.s.handler != nil {
@@ -1627,6 +1636,7 @@ func (c *inboundCall) close(ctx context.Context, end EndCall) {
 }
 
 func (c *inboundCall) closeWithTimeout(ctx context.Context, isError bool) {
+	c.setCompletionHangupSource("media-timeout")
 	status := callDropped
 	if !isError {
 		status = callHangupMedia

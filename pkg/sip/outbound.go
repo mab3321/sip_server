@@ -396,6 +396,7 @@ func (c *outboundCall) close(ctx context.Context, end EndCall) bool {
 		c.c.cmu.Unlock()
 
 		c.c.DeregisterTransferSIPParticipant(string(c.cc.ID()))
+		c.emitCallCompletion(end)
 
 		// Call the handler asynchronously to avoid blocking
 		if c.c.handler != nil {
