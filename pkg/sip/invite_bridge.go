@@ -37,6 +37,10 @@ func (c *inboundCall) startInviteBridge(ctx context.Context, transferTo string, 
 		if err := c.startInviteDirectMedia(ctx, transferTo, headers); err == nil {
 			return nil
 		} else {
+			if c.s.conf.InviteDirectMediaRequired {
+				c.log().Errorw("direct-media transfer failed; anchored fallback is disabled", err)
+				return fmt.Errorf("direct-media transfer required: %w", err)
+			}
 			c.log().Warnw("direct-media transfer failed; falling back to anchored INVITE bridge", err)
 		}
 	}

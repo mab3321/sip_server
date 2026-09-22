@@ -125,7 +125,11 @@ type Config struct {
 	// call control to point the two carrier legs at each other's SDP. It is only
 	// considered when InviteBridgeTransfer is enabled and falls back to the
 	// anchored bridge if negotiation fails.
-	InviteDirectMediaTransfer bool                         `yaml:"invite_direct_media_transfer"`
+	InviteDirectMediaTransfer bool `yaml:"invite_direct_media_transfer"`
+	// InviteDirectMediaRequired makes direct-media transfer fail closed. When
+	// enabled, a failed direct-media negotiation is returned to the caller and
+	// the RTP-anchored INVITE bridge is not attempted.
+	InviteDirectMediaRequired bool                         `yaml:"invite_direct_media_required"`
 	CallCompletionWebhook     *CallCompletionWebhookConfig `yaml:"call_completion_webhook"`
 
 	UseExternalIP bool   `yaml:"use_external_ip"`

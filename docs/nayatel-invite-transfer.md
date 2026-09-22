@@ -9,11 +9,15 @@ does not require Asterisk.
 ```yaml
 invite_bridge_transfer: true
 invite_direct_media_transfer: true
+invite_direct_media_required: true
 ```
 
 `invite_bridge_transfer` enables the INVITE-based transfer path.
-`invite_direct_media_transfer` attempts a direct-media handoff first. Both
-options are disabled by default, so ordinary LiveKit SIP behavior is unchanged.
+`invite_direct_media_transfer` attempts a direct-media handoff first.
+`invite_direct_media_required` disables the RTP-anchored fallback: a failed
+direct-media negotiation fails the transfer visibly instead of consuming SIP
+server media resources. All options are disabled by default, so ordinary
+LiveKit SIP behavior is unchanged.
 
 The completion webhook is independently configured with
 `call_completion_webhook` or the deployment's environment-backed configuration.
@@ -32,8 +36,9 @@ Do not commit webhook credentials.
    emitted after the complete call ends.
 
 The SIP service does not relay or transcode RTP after a successful direct-media
-handoff. If direct-media negotiation fails, it automatically falls back to the
-anchored INVITE bridge, where the SIP service does carry media.
+handoff. When `invite_direct_media_required` is enabled, negotiation failure is
+returned as a transfer error and no anchored RTP bridge is created. When it is
+disabled, the service automatically falls back to the anchored INVITE bridge.
 
 ## Lifecycle safeguards
 
