@@ -71,6 +71,7 @@ type Client struct {
 	closing     core.Fuse
 	cmu         sync.Mutex
 	activeCalls map[LocalTag]*outboundCall
+	bridgeCalls map[LocalTag]*inviteBridge
 
 	handler         Handler
 	getStateHandler GetStateHandler
@@ -109,6 +110,7 @@ func NewClient(region string, conf *config.Config, log logger.Logger, mon *stats
 		getSipClient:    DefaultGetSipClientFunc,
 		getRoom:         DefaultGetRoomFunc,
 		activeCalls:     make(map[LocalTag]*outboundCall),
+		bridgeCalls:     make(map[LocalTag]*inviteBridge),
 	}
 	for _, option := range options {
 		option(c)
@@ -150,10 +152,15 @@ func (c *Client) Stop() {
 	c.closing.Break()
 	c.cmu.Lock()
 	calls := maps.Values(c.activeCalls)
+	bridges := maps.Values(c.bridgeCalls)
 	c.activeCalls = make(map[LocalTag]*outboundCall)
+	c.bridgeCalls = make(map[LocalTag]*inviteBridge)
 	c.cmu.Unlock()
 	for _, call := range calls {
 		call.Close(ctx)
+	}
+	for _, bridge := range bridges {
+		bridge.closeFromService(ctx)
 	}
 	if c.sipCli != nil {
 		c.sipCli.Close()
@@ -537,7 +544,12 @@ func (c *Client) onBye(req *sip.Request, tx sip.ServerTransaction) bool {
 	tag, _ := GetLocalTagUAS(req)
 	c.cmu.Lock()
 	call := c.activeCalls[tag]
+	bridge := c.bridgeCalls[tag]
 	c.cmu.Unlock()
+	if bridge != nil {
+		bridge.acceptOutboundBye(req, tx)
+		return true
+	}
 	if call == nil {
 		return false
 	}

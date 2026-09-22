@@ -105,6 +105,10 @@ type Config struct {
 	MaxCpuUtilization    float64             `yaml:"max_cpu_utilization"`
 	MaxActiveCalls       int                 `yaml:"max_active_calls"` // if set, used for affinity-based routing
 	SIPTrunkIds          []string            `yaml:"sip_trunk_ids"`    // if set, only accept calls for these trunk IDs
+	// InviteBridgeTransfer replaces REFER with an outbound INVITE and bridges
+	// both SIP legs locally. This is intended for carriers that do not support
+	// REFER. The SIP service remains the B2BUA and RTP anchor after transfer.
+	InviteBridgeTransfer bool `yaml:"invite_bridge_transfer"`
 
 	UseExternalIP bool   `yaml:"use_external_ip"`
 	LocalNet      string `yaml:"local_net"` // local IP net to use, e.g. 192.168.0.0/24

@@ -753,6 +753,8 @@ type inboundCall struct {
 	joinDur           func() time.Duration
 	done              atomic.Bool
 	started           core.Fuse
+	bridged           core.Fuse
+	inviteBridge      atomic.Pointer[inviteBridge]
 	lateAnswerPending atomic.Bool // later offer generated, answer pending
 	stats             Stats
 	sigTs             SignalingTimestamps
@@ -1175,6 +1177,7 @@ func (c *inboundCall) waitForCallEnd(ctx context.Context, ackReceived <-chan str
 
 	statsTicker := time.NewTicker(statsInterval)
 	defer statsTicker.Stop()
+	roomClosed := c.lkRoom.Closed()
 	for {
 		select {
 		case <-statsTicker.C:
@@ -1189,7 +1192,16 @@ func (c *inboundCall) waitForCallEnd(ctx context.Context, ackReceived <-chan str
 		case end := <-c.endCall:
 			c.close(ctx, end)
 			return nil
-		case <-c.lkRoom.Closed():
+		case <-c.bridged.Watch():
+			// An INVITE bridge deliberately removes this SIP participant from
+			// LiveKit. From this point the SIP dialogs, rather than the room,
+			// own call lifetime.
+			roomClosed = nil
+		case <-roomClosed:
+			if c.bridged.IsBroken() {
+				roomClosed = nil
+				continue
+			}
 			roomReason := c.lkRoom.ClosedReason()
 			c.state.DeferUpdate(func(info *livekit.SIPCallInfo) {
 				info.DisconnectReason = disconnectReasonFromRoomClose(roomReason)
@@ -1542,6 +1554,9 @@ func (c *inboundCall) close(ctx context.Context, end EndCall) {
 	if !c.done.CompareAndSwap(false, true) {
 		return
 	}
+	if bridge := c.inviteBridge.Load(); bridge != nil {
+		bridge.closeFromInbound(ctx)
+	}
 	defer c.mon.StageDurTimer("close")()
 	c.stats.Closed.Store(true)
 	result := Result{
@@ -1881,7 +1896,11 @@ func (c *inboundCall) transferCall(ctx context.Context, transferTo string, heade
 		}()
 	}
 
-	err = c.cc.TransferCall(ctx, transferTo, headers, c.ctx.Done())
+	if c.s.conf.InviteBridgeTransfer {
+		err = c.startInviteBridge(ctx, transferTo, headers)
+	} else {
+		err = c.cc.TransferCall(ctx, transferTo, headers, c.ctx.Done())
+	}
 	if err != nil {
 		c.log().Infow("inbound call failed to transfer", "error", err, "transferTo", transferTo)
 		return transferID, err
