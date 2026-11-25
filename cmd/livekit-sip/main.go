@@ -80,9 +80,10 @@ func runService(ctx context.Context, c *cli.Command) error {
 		return err
 	}
 
-	bus := psrpc.NewRedisMessageBus(rc)
+	bus := psrpc.NewRedisMessageBus(rc, conf.PSRPC.BusOptions()...)
 	psrpcClient, err := rpc.NewIOInfoClient(bus,
 		otelpsrpc.ClientOptions(otelpsrpc.Config{}),
+		psrpc.WithClientSelectTimeout(psrpcSelectTimeout()),
 	)
 	if err != nil {
 		return err

@@ -28,6 +28,7 @@ import (
 	"github.com/livekit/protocol/logger"
 	"github.com/livekit/protocol/logger/medialogutils"
 	"github.com/livekit/protocol/redis"
+	"github.com/livekit/protocol/rpc"
 	"github.com/livekit/protocol/utils/guid"
 	"github.com/livekit/psrpc"
 	lksdk "github.com/livekit/server-sdk-go/v2"
@@ -43,23 +44,6 @@ const (
 var (
 	DefaultRTPPortRange = rtcconfig.PortRange{Start: 10000, End: 20000}
 )
-
-// OpusConfig tunes the Opus encoder for SIP media. All fields are optional;
-// zero values keep libopus defaults.
-type OpusConfig struct {
-	Bitrate           int  `yaml:"bitrate"`             // target bitrate in bits/sec (e.g. 24000); 0 = auto
-	Complexity        int  `yaml:"complexity"`          // encoder complexity 1-10; 0 = default
-	FEC               bool `yaml:"fec"`                 // enable in-band Forward Error Correction
-	PacketLossPercent int  `yaml:"packet_loss_percent"` // expected packet loss 0-100, tunes FEC
-}
-
-// DTLSSRTPConfig enables WebRTC-style DTLS-SRTP media for SIP peers such as
-// Meta Business Calling. It is deliberately independent of SIP signaling TLS
-// and of the legacy SDES media-encryption setting.
-type DTLSSRTPConfig struct {
-	Enabled          bool          `yaml:"enabled"`
-	HandshakeTimeout time.Duration `yaml:"handshake_timeout"`
-}
 
 const (
 	// After a call closes we keep its RTP port bound and draining so a freshly
@@ -97,11 +81,25 @@ type TCPConfig struct {
 	DialPort rtcconfig.PortRange `yaml:"dial_port"`
 }
 
+// CallCompletionWebhookConfig controls delivery of one terminal event for
+// every SIP call. Secrets can be supplied through the corresponding
+// SIP_CALL_COMPLETION_WEBHOOK_* environment variables instead of YAML.
+type CallCompletionWebhookConfig struct {
+	URL          string        `yaml:"url"`
+	BearerToken  string        `yaml:"bearer_token"`
+	XServiceKey  string        `yaml:"x_service_key"`
+	Timeout      time.Duration `yaml:"timeout"`
+	MaxAttempts  int           `yaml:"max_attempts"`
+	RetryBackoff time.Duration `yaml:"retry_backoff"`
+}
+
 type Config struct {
 	Redis     *redis.RedisConfig `yaml:"redis"`      // required
 	ApiKey    string             `yaml:"api_key"`    // required (env LIVEKIT_API_KEY)
 	ApiSecret string             `yaml:"api_secret"` // required (env LIVEKIT_API_SECRET)
 	WsUrl     string             `yaml:"ws_url"`     // required (env LIVEKIT_WS_URL)
+
+	PSRPC rpc.PSRPCConfig `yaml:"psrpc,omitempty"`
 
 	HealthPort           int                 `yaml:"health_port"`
 	PrometheusPort       int                 `yaml:"prometheus_port"`
@@ -119,6 +117,20 @@ type Config struct {
 	MaxCpuUtilization    float64             `yaml:"max_cpu_utilization"`
 	MaxActiveCalls       int                 `yaml:"max_active_calls"` // if set, used for affinity-based routing
 	SIPTrunkIds          []string            `yaml:"sip_trunk_ids"`    // if set, only accept calls for these trunk IDs
+	// InviteBridgeTransfer replaces REFER with an outbound INVITE and bridges
+	// both SIP legs locally. This is intended for carriers that do not support
+	// REFER. The SIP service remains the B2BUA and RTP anchor after transfer.
+	InviteBridgeTransfer bool `yaml:"invite_bridge_transfer"`
+	// InviteDirectMediaTransfer experimentally uses RFC 3725-style third-party
+	// call control to point the two carrier legs at each other's SDP. It is only
+	// considered when InviteBridgeTransfer is enabled and falls back to the
+	// anchored bridge if negotiation fails.
+	InviteDirectMediaTransfer bool `yaml:"invite_direct_media_transfer"`
+	// InviteDirectMediaRequired makes direct-media transfer fail closed. When
+	// enabled, a failed direct-media negotiation is returned to the caller and
+	// the RTP-anchored INVITE bridge is not attempted.
+	InviteDirectMediaRequired bool                         `yaml:"invite_direct_media_required"`
+	CallCompletionWebhook     *CallCompletionWebhookConfig `yaml:"call_completion_webhook"`
 
 	UseExternalIP bool   `yaml:"use_external_ip"`
 	LocalNet      string `yaml:"local_net"` // local IP net to use, e.g. 192.168.0.0/24
@@ -130,19 +142,16 @@ type Config struct {
 	MediaUseExternalIP bool   `yaml:"media_use_external_ip"`
 	MediaNAT1To1IP     string `yaml:"media_nat_1_to_1_ip"`
 
-	MediaTimeout         time.Duration   `yaml:"media_timeout"`
-	MediaTimeoutInitial  time.Duration   `yaml:"media_timeout_initial"`
-	SymmetricRTP         bool            `yaml:"symmetric_rtp"`
+	MediaTimeout        time.Duration `yaml:"media_timeout"`
+	MediaTimeoutInitial time.Duration `yaml:"media_timeout_initial"`
+	SymmetricRTP        bool          `yaml:"symmetric_rtp"`
 	// RTPDrainingIdleTimeout / RTPDrainingDuration control how long a closed call's RTP
 	// port is kept bound and draining before it can be reallocated. Set to a negative
 	// value to disable. Zero uses the defaults.
-	RTPDrainingIdleTimeout time.Duration `yaml:"rtp_draining_idle_timeout"`
-	RTPDrainingDuration    time.Duration `yaml:"rtp_draining_duration"`
-	IgnoreLocalAddrInSDP bool            `yaml:"ignore_local_addr_in_sdp"` // enable symmetric RTP if local IP is specified in SDP
-	Codecs               map[string]bool `yaml:"codecs"`
-	EnableOpus           bool            `yaml:"enable_opus"`
-	Opus                 OpusConfig      `yaml:"opus"`
-	DTLSSRTP             DTLSSRTPConfig  `yaml:"dtls_srtp"`
+	RTPDrainingIdleTimeout time.Duration   `yaml:"rtp_draining_idle_timeout"`
+	RTPDrainingDuration    time.Duration   `yaml:"rtp_draining_duration"`
+	IgnoreLocalAddrInSDP   bool            `yaml:"ignore_local_addr_in_sdp"` // enable symmetric RTP if local IP is specified in SDP
+	Codecs                 map[string]bool `yaml:"codecs"`
 
 	// HideInboundPort controls how SIP endpoint responds to unverified inbound requests.
 	// Setting it to true makes SIP server silently drop INVITE requests if it gets a negative Auth or Dispatch response.
@@ -178,10 +187,25 @@ func NewConfig(confString string) (*Config, error) {
 		ApiSecret:   os.Getenv("LIVEKIT_API_SECRET"),
 		WsUrl:       os.Getenv("LIVEKIT_WS_URL"),
 		ServiceName: "sip",
+		PSRPC:       rpc.DefaultPSRPCConfig,
 	}
 	if confString != "" {
 		if err := yaml.Unmarshal([]byte(confString), conf); err != nil {
 			return nil, errors.ErrCouldNotParseConfig(err)
+		}
+	}
+	if conf.CallCompletionWebhook == nil && os.Getenv("SIP_CALL_COMPLETION_WEBHOOK_URL") != "" {
+		conf.CallCompletionWebhook = &CallCompletionWebhookConfig{}
+	}
+	if wh := conf.CallCompletionWebhook; wh != nil {
+		if v := os.Getenv("SIP_CALL_COMPLETION_WEBHOOK_URL"); v != "" {
+			wh.URL = v
+		}
+		if v := os.Getenv("SIP_CALL_COMPLETION_WEBHOOK_BEARER_TOKEN"); v != "" {
+			wh.BearerToken = v
+		}
+		if v := os.Getenv("SIP_CALL_COMPLETION_WEBHOOK_X_SERVICE_KEY"); v != "" {
+			wh.XServiceKey = v
 		}
 	}
 
@@ -228,8 +252,16 @@ func (c *Config) Init() error {
 	if c.MaxCpuUtilization <= 0 || c.MaxCpuUtilization > 1 {
 		c.MaxCpuUtilization = 0.9
 	}
-	if c.DTLSSRTP.HandshakeTimeout <= 0 {
-		c.DTLSSRTP.HandshakeTimeout = 10 * time.Second
+	if wh := c.CallCompletionWebhook; wh != nil {
+		if wh.Timeout <= 0 {
+			wh.Timeout = 15 * time.Second
+		}
+		if wh.MaxAttempts <= 0 {
+			wh.MaxAttempts = 5
+		}
+		if wh.RetryBackoff <= 0 {
+			wh.RetryBackoff = time.Second
+		}
 	}
 
 	if err := c.InitLogger(); err != nil {
